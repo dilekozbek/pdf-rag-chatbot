@@ -53,9 +53,4 @@ streamlit run app.py
 - **Grounding.** Forced "use only context, otherwise say no info" via prompt. Without it the model mixes its training data in.
 - **Source pages.** Each chunk indexed with page number. Shown in UI.
 
-## TODO
 
-- Multi-PDF support
-- BM25 + dense hybrid retrieval
-- Re-ranking
-- Eval pipeline
