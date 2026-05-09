@@ -5,7 +5,7 @@ Built with Streamlit + ChromaDB + Gemini.
 
 ## Demo
 
-Live: _coming soon_
+🔗 **Live demo:** (https://pdf-rag-chatbot-tr.streamlit.app)  
 
 ## Features
 
