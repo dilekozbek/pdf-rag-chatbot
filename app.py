@@ -1,0 +1,82 @@
+import os
+import streamlit as st
+from dotenv import load_dotenv
+from pypdf import PdfReader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+import chromadb
+from chromadb.utils import embedding_functions
+from google import genai
+from google.genai import types
+
+load_dotenv()
+llm = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+# --- Streamlit title ---
+st.set_page_config(page_title="PDF Chat", page_icon="📄")
+st.title("📄 PDF İle Sohbet")
+st.caption("PDF yükle, soru sor, RAG ile cevap al.")
+
+# --- ChromaDB ---
+@st.cache_resource
+def get_collection():
+	chroma = chromadb.PersistentClient(path="./chroma_db")
+	return chroma.get_or_create_collection(
+		name="pdf_chunks",
+		embedding_function= embedding_functions.DefaultEmbeddingFunction(),
+	)
+
+collection = get_collection()
+
+# --- PDF upload ---
+uploaded = st.file_uploader("PDF dosyası seç", type="pdf")
+
+if uploaded:
+	if st.button("PDF'i işle"):
+		with st.spinner("PDF okunuyor ve chunk'lanıyor..."): 
+			reader = PdfReader(uploaded)
+			text = "\n".join(page.extract_text() for page in reader.pages)
+
+			splitter = RecursiveCharacterTextSplitter(
+				chunk_size = 800,
+				chunk_overlap = 150,
+				separators = ["\n\n", "\n", ". ", " ", ""],
+			)
+			chunks = splitter.split_text(text)
+
+			collection.add(
+				documents=chunks,
+				ids=[f"chunk_{i}" for i in range(len(chunks))],
+			)
+		st.success(f"{len(chunks)} chunk işlendi.")
+
+# --- Soru sorma ---
+question = st.text_input("Sorunu yaz:")
+
+if question:
+	with st.spinner("Cevap aranıyor..."):
+		results = collection.query(query_texts=[question], n_results=8)
+		context = "\n".join(f"- {d}" for d in results["documents"][0])
+
+		prompt = f""" Aşağıdaki context'i kullanarak Türkçe cevap ver.
+Eğer context'te yoksa "Belgede bilgi yok" de.                                                      
+                                         
+CONTEXT:
+{context}
+SORU: {question} 
+"""
+
+		response = llm.models.generate_content(
+			model="gemini-2.5-flash",
+			contents=prompt,
+			config=types.GenerateContentConfig(
+				temperature = 0.0,
+				max_output_tokens = 400,
+				thinking_config = types.ThinkingConfig(thinking_budget=0),
+			),
+		)
+	st.markdown("### Cevap")
+	st.write(response.text)
+
+	with st.expander("Kullanılan context"):
+		for i, doc in enumerate(results["documents"][0]):
+			st.text(f"[{i+1}] {doc[:300]}...")
