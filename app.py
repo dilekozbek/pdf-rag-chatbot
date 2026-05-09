@@ -17,12 +17,20 @@ st.title("📄 PDF İle Sohbet")
 st.caption("PDF yükle, soru sor, RAG ile cevap al.")
 
 # --- ChromaDB ---
+class GeminiEmbedding(embedding_functions.EmbeddingFunction):
+	def __call__(self, input):
+		result = llm.models.embed_content(
+			model="gemini-embedding-001",
+			contents=input,
+		)
+		return [e.values for e in result.embeddings]
+
 @st.cache_resource
 def get_collection():
 	chroma = chromadb.PersistentClient(path="./chroma_db")
 	return chroma.get_or_create_collection(
 		name="pdf_chunks",
-		embedding_function= embedding_functions.DefaultEmbeddingFunction(),
+		embedding_function=GeminiEmbedding(),
 	)
 
 collection = get_collection()
