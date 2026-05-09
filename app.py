@@ -1,4 +1,5 @@
 import os
+import time
 import datetime as dt
 import streamlit as st
 from dotenv import load_dotenv
@@ -7,7 +8,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 import chromadb
 from chromadb.utils import embedding_functions
 from google import genai
-from google.genai import types
+from google.genai import types, errors
 
 load_dotenv()
 llm = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -43,15 +44,25 @@ def check_daily_limit():
 class GeminiEmbedding(embedding_functions.EmbeddingFunction):
 	def __call__(self, input):
 		# Gemini batch limit 100, biz 50'lik batch'lerle güvenli gidiyoruz
+		# 429 rate limit gelirse 30 sn bekleyip tekrar deniyoruz
 		embeddings = []
 		batch_size = 50
 		for i in range(0, len(input), batch_size):
 			batch = input[i:i + batch_size]
-			result = llm.models.embed_content(
-				model="gemini-embedding-001",
-				contents=batch,
-			)
-			embeddings.extend([e.values for e in result.embeddings])
+			for attempt in range(3):
+				try:
+					result = llm.models.embed_content(
+						model="gemini-embedding-001",
+						contents=batch,
+					)
+					embeddings.extend([e.values for e in result.embeddings])
+					break
+				except errors.ClientError as e:
+					if e.code == 429 and attempt < 2:
+						st.toast(f"⏳ Yoğunluk var, 30 saniye bekleniyor... (deneme {attempt + 2}/3)", icon="⏳")
+						time.sleep(30)
+						continue
+					raise
 		return embeddings
 
 @st.cache_resource
