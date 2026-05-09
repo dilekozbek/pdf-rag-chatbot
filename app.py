@@ -1,4 +1,5 @@
 import os
+import datetime as dt
 import streamlit as st
 from dotenv import load_dotenv
 from pypdf import PdfReader
@@ -16,14 +17,42 @@ st.set_page_config(page_title="PDF Chat", page_icon="📄")
 st.title("📄 PDF İle Sohbet")
 st.caption("PDF yükle, soru sor, RAG ile cevap al.")
 
+# Demo limitleri — free tier kotasını korumak için
+MAX_QUERIES_PER_SESSION = 5    # her tarayıcı oturumu için
+MAX_DAILY_QUERIES = 50         # tüm kullanıcılar için günlük toplam
+
+if "query_count" not in st.session_state:
+	st.session_state.query_count = 0
+
+
+@st.cache_resource
+def get_daily_counter():
+	# Tüm session'lar arası paylaşılan singleton
+	return {"date": dt.date.today(), "count": 0}
+
+
+def check_daily_limit():
+	counter = get_daily_counter()
+	today = dt.date.today()
+	if counter["date"] != today:
+		counter["date"] = today
+		counter["count"] = 0
+	return counter
+
 # --- ChromaDB ---
 class GeminiEmbedding(embedding_functions.EmbeddingFunction):
 	def __call__(self, input):
-		result = llm.models.embed_content(
-			model="gemini-embedding-001",
-			contents=input,
-		)
-		return [e.values for e in result.embeddings]
+		# Gemini batch limit 100, biz 50'lik batch'lerle güvenli gidiyoruz
+		embeddings = []
+		batch_size = 50
+		for i in range(0, len(input), batch_size):
+			batch = input[i:i + batch_size]
+			result = llm.models.embed_content(
+				model="gemini-embedding-001",
+				contents=batch,
+			)
+			embeddings.extend([e.values for e in result.embeddings])
+		return embeddings
 
 @st.cache_resource
 def get_collection():
@@ -37,10 +66,22 @@ collection = get_collection()
 
 # --- PDF upload ---
 uploaded = st.file_uploader("PDF dosyası seç", type="pdf")
+st.caption("📌 Önerilen: 5-15 sayfa, max 2MB · Büyük PDF'ler işlem süresini uzatır")
+
+MAX_FILE_SIZE = 2 * 1024 * 1024  # 2MB
 
 if uploaded:
+	if uploaded.size > MAX_FILE_SIZE:
+		st.error(f"⚠️ Dosya çok büyük ({uploaded.size / 1024 / 1024:.1f}MB). Lütfen 2MB altı bir PDF deneyin.")
+		st.stop()
+
 	if st.button("PDF'i işle"):
-		with st.spinner("PDF okunuyor ve chunk'lanıyor..."): 
+		with st.spinner("PDF okunuyor ve chunk'lanıyor..."):
+			# Önce eski PDF'in chunk'larını temizle
+			existing = collection.get()["ids"]
+			if existing:
+				collection.delete(ids=existing)
+
 			reader = PdfReader(uploaded)
 
 			splitter = RecursiveCharacterTextSplitter(
@@ -67,38 +108,60 @@ if uploaded:
 
 			collection.add(
 				documents=all_chunks,
-				metadatas=all_metadata, 
+				metadatas=all_metadata,
 				ids=all_ids,
 			)
 		st.success(f"{len(all_chunks)} chunk işlendi.")
 
 # --- Soru sorma ---
 question = st.text_input("Sorunu yaz:")
+st.caption(f"💬 Bu oturumda kalan soru hakkı: {MAX_QUERIES_PER_SESSION - st.session_state.query_count}/{MAX_QUERIES_PER_SESSION}")
+
+
+@st.cache_data(ttl=3600)
+def ask_llm(question: str, context: str) -> str:
+	# Aynı soru-context tekrar gelirse cache'den dön, yeni API çağrısı yapma
+	prompt = f"""Aşağıdaki context'i kullanarak Türkçe cevap ver.
+Eğer context'te yoksa "Belgede bilgi yok" de.
+
+CONTEXT:
+{context}
+
+SORU: {question}
+"""
+	response = llm.models.generate_content(
+		model="gemini-2.5-flash-lite",
+		contents=prompt,
+		config=types.GenerateContentConfig(
+			temperature=0.0,
+			max_output_tokens=400,
+			thinking_config=types.ThinkingConfig(thinking_budget=0),
+		),
+	)
+	return response.text
+
 
 if question:
+	# Session limit
+	if st.session_state.query_count >= MAX_QUERIES_PER_SESSION:
+		st.warning(f"⚠️ Demo limiti doldu ({MAX_QUERIES_PER_SESSION} soru). Sayfayı yenileyin.")
+		st.stop()
+
+	# Daily global limit
+	daily = check_daily_limit()
+	if daily["count"] >= MAX_DAILY_QUERIES:
+		st.error("⚠️ Şu anda kullanılamıyor. Lütfen daha sonra tekrar deneyin.")
+		st.stop()
+
 	with st.spinner("Cevap aranıyor..."):
 		results = collection.query(query_texts=[question], n_results=8)
 		context = "\n".join(f"- {d}" for d in results["documents"][0])
+		answer = ask_llm(question, context)
+		st.session_state.query_count += 1
+		daily["count"] += 1
 
-		prompt = f""" Aşağıdaki context'i kullanarak Türkçe cevap ver.
-Eğer context'te yoksa "Belgede bilgi yok" de.                                                      
-                                         
-CONTEXT:
-{context}
-SORU: {question} 
-"""
-
-		response = llm.models.generate_content(
-			model="gemini-2.5-flash",
-			contents=prompt,
-			config=types.GenerateContentConfig(
-				temperature = 0.0,
-				max_output_tokens = 400,
-				thinking_config = types.ThinkingConfig(thinking_budget=0),
-			),
-		)
 	st.markdown("### Cevap")
-	st.write(response.text)
+	st.write(answer)
 
 	with st.expander("Kullanılan context"):
 		docs = results["documents"][0]
