@@ -42,20 +42,35 @@ if uploaded:
 	if st.button("PDF'i işle"):
 		with st.spinner("PDF okunuyor ve chunk'lanıyor..."): 
 			reader = PdfReader(uploaded)
-			text = "\n".join(page.extract_text() for page in reader.pages)
 
 			splitter = RecursiveCharacterTextSplitter(
 				chunk_size = 800,
 				chunk_overlap = 150,
 				separators = ["\n\n", "\n", ". ", " ", ""],
 			)
-			chunks = splitter.split_text(text)
+
+			all_chunks = []
+			all_metadata = []
+			all_ids = []
+			chunk_idx = 0
+
+			for page_num, page in enumerate(reader.pages, start=1):
+				page_text = page.extract_text()
+				if not page_text.strip():
+					continue
+				page_chunks = splitter.split_text(page_text)
+				for c in page_chunks:
+					all_chunks.append(c)
+					all_metadata.append({"page": page_num, "source": uploaded.name})
+					all_ids.append(f"chunk_{chunk_idx}")
+					chunk_idx += 1
 
 			collection.add(
-				documents=chunks,
-				ids=[f"chunk_{i}" for i in range(len(chunks))],
+				documents=all_chunks,
+				metadatas=all_metadata, 
+				ids=all_ids,
 			)
-		st.success(f"{len(chunks)} chunk işlendi.")
+		st.success(f"{len(all_chunks)} chunk işlendi.")
 
 # --- Soru sorma ---
 question = st.text_input("Sorunu yaz:")
@@ -86,5 +101,9 @@ SORU: {question}
 	st.write(response.text)
 
 	with st.expander("Kullanılan context"):
-		for i, doc in enumerate(results["documents"][0]):
-			st.text(f"[{i+1}] {doc[:300]}...")
+		docs = results["documents"][0]
+		metas = results["metadatas"][0]
+		for i, (doc, meta) in enumerate(zip(docs, metas)):
+			page = meta.get("page", "?")
+			st.markdown(f"**[{i+1}] Sayfa {page}**")
+			st.text(doc[:300] + "...")
